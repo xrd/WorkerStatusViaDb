@@ -5,6 +5,9 @@ import android.util.Log
 import android.view.*
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProviders
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -13,12 +16,17 @@ import androidx.work.OneTimeWorkRequest
 import androidx.work.WorkManager
 import com.google.android.material.floatingactionbutton.FloatingActionButton
 import kotlinx.android.synthetic.main.activity_main.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.newSingleThreadContext
 import java.util.*
 
 class MainActivity : AppCompatActivity() {
 
     private var videoAssetsViewModel: VideoAssetViewModel? = null
     private var adapter: VideoAssetsAdapter? = null
+    val networkScope = CoroutineScope(newSingleThreadContext("NetworkThread"))
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -30,6 +38,32 @@ class MainActivity : AppCompatActivity() {
         }
         videoAssetsViewModel = ViewModelProviders.of(this).get(VideoAssetViewModel::class.java)
         setupPreviewImages()
+    }
+
+    private suspend fun addNewVideo() {
+        val videoAsset = VideoAsset()
+        videoAsset.uuid = Integer.toHexString(Random().nextInt() * 10000)
+        videoAssetsViewModel?.insert(videoAsset)
+
+        var uuid = videoAsset.uuid
+        var progress = 0
+        var videoDao: VideoAssetDao? = null
+
+        val db = VideoAssetDatabase.getDatabase(applicationContext)
+        if (db != null) {
+            videoDao = db.videoAssetDao()
+        }
+
+        while (progress < 100) {
+            progress += (Random().nextFloat() * 10.0).toInt()
+
+            delay(1000)
+
+            Log.d( MainActivity.TAG, "Updating progress for ${uuid}: ${progress}")
+            if (uuid != null) {
+                videoDao?.updateProgressByUuid(uuid, progress)
+            }
+        }
     }
 
     private fun uploadNewVideo() {
@@ -50,17 +84,8 @@ class MainActivity : AppCompatActivity() {
     private fun setupPreviewImages() {
         val mLayoutManager = GridLayoutManager(this, 4)
         previewImagesRecyclerView.layoutManager = mLayoutManager
-        adapter = VideoAssetsAdapter(videoAssetsViewModel?.videos?.value)
+        adapter = VideoAssetsAdapter(this,videoAssetsViewModel?.videos)
         previewImagesRecyclerView.adapter = adapter
-
-        videoAssetsViewModel?.videos?.observe(this, androidx.lifecycle.Observer { t ->
-            if( t != null ){
-                if (t.size > 0 ){
-                    adapter?.setVideos(t)
-                    previewImagesRecyclerView.adapter = adapter
-                }
-            }
-        })
     }
 
     inner class VideoAssetViewHolder(videoView: View) : RecyclerView.ViewHolder(videoView) {
@@ -73,49 +98,37 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    inner class VideoAssetsAdapter(private var videos: List<VideoAsset>?) :
+    inner class VideoAssetsAdapter(
+            lifecycle: LifecycleOwner,
+            val videos: LiveData<List<VideoAsset>>?) :
             RecyclerView.Adapter<VideoAssetViewHolder>() {
+
         override fun onCreateViewHolder(parent: ViewGroup,
                                         viewType: Int): VideoAssetViewHolder {
             return VideoAssetViewHolder(LayoutInflater.from(parent.context).inflate(R.layout.preview_image, parent, false))
         }
 
-        override fun onBindViewHolder(holder: VideoAssetViewHolder, position: Int) {
-            val video = videos?.get(position)
+        init {
+            videos?.observe(lifecycle, Observer {
+                /**
+                 * rebuild list when data changes. a better implementation would use DiffUtils here :-)
+                 */
+                notifyDataSetChanged()
+            })
+        }
 
+        override fun onBindViewHolder(holder: VideoAssetViewHolder, position: Int) {
+            val video = videos?.value?.get(position)
             if (video != null && videoAssetsViewModel != null) {
                 val uuid = video.uuid
                 if( uuid != null ) {
                     holder.uuidText.text = uuid
-
-                    // Get the livedata to observe and change
-                    val living = videoAssetsViewModel?.getByUuid(uuid)
-
-                    living?.observe(this@MainActivity, androidx.lifecycle.Observer { v ->
-                        // Got a change, do something with it.
-                        if (v != null) {
-                            holder.progressText.text = "${v.progress}%"
-                        }
-                        else {
-                            Log.d( TAG, "Video is null, WHY?")
-                        }
-                    })
+                    holder.progressText.text = "${video.progress}%"
                 }
             }
         }
 
-        fun setVideos(t: List<VideoAsset>?) {
-            videos = t
-            notifyDataSetChanged()
-        }
-
-        override fun getItemCount(): Int {
-            var size = 0
-            if (videos != null) {
-                size = videos?.size!!
-            }
-            return size
-        }
+        override fun getItemCount() = videos?.value?.size ?: 0
     }
 
     companion object {
